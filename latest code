@@ -1,0 +1,310 @@
+# This is a revised version of the code to estimate excess deaths after Hurricane Maria using Model 2.
+# Specifically, pred.a2 is modified to also account for the population displacement 
+library(stringr)
+library(gridExtra)
+library(lubridate)
+library(tidyverse) #already includes ggplot
+library(mgcv) #gam
+#library(MASS) #mvnorm, make package available later since select clashes with dplr select
+
+setwd("directory with files HERE")
+death_cert<-read.table("official_data.csv",sep=",",header=T)
+death_cert<-death_cert%>%mutate(date=seq(as.Date("2015/1/1"), as.Date("2018/12/31"), "days"))
+
+population_by_year<-read.table("population_by_year.csv",sep=",",header=T)
+
+net_movement<- read.table("ts_intl.csv",sep=",",header=T)
+
+sep<- as.numeric(slice(population_by_year,8)%>%select(pop)-slice(net_movement,5)%>%select(Movimiento.neto.pasajeros))
+oct<- sep-as.numeric(slice(net_movement,4)%>%select(Movimiento.neto.pasajeros))
+nov<- oct-as.numeric(slice(net_movement,3)%>%select(Movimiento.neto.pasajeros))
+dec<- nov-as.numeric(slice(net_movement,2)%>%select(Movimiento.neto.pasajeros))
+jan<- dec-as.numeric(slice(net_movement,1)%>%select(Movimiento.neto.pasajeros))
+1-sep/3337177#decrease in 2017 U.S. vintage population estimate.
+tmp <- bind_rows(data.frame(date = make_date(year = 2010:2017, month = 7, day = 2), 
+                            pop = population_by_year$pop),
+                 data.frame(date = make_date(year=c(2017,2017,2017,2017,2018,2018), 
+                                             month=c(9,10,11,12,1,2), 
+                                             day = c(30,31,30,31,31,28)),
+                            pop = c(sep, oct, nov, dec, jan, jan)))
+
+
+######### For the model that does not account for net movement of air passenger simply run next few lines below
+
+lm_p<-lm(population_by_year$pop[2:8]~population_by_year$pop[1:7]) #rough estimate of yearly population change
+summary(lm_p)
+3337177*1.098-4.072e+05
+tmp2 <- bind_rows(data.frame(date = make_date(year = 2010:2017, month = 7, day = 2), 
+                            pop = population_by_year$pop),
+           data.frame(date = make_date(year=2018, 
+                                             month=7, 
+                                             day = 2),
+                            pop = 3257020)) #Hurricane Maria never happened population
+
+tmp <- approx(tmp$date, tmp$pop, xout=death_cert$date, rule = 2)
+tmp2 <- approx(tmp2$date, tmp2$pop, xout=death_cert$date, rule = 2)
+predicted_pop <- data.frame(date = tmp$x, pop = tmp$y)
+predicted_pop2 <- data.frame(date = tmp2$x, pop2 = tmp2$y)
+
+death_cert<-tbl_df(death_cert)
+death_cert <- death_cert %>% left_join(predicted_pop, by = "date") %>%
+  mutate(rate = deaths/pop*365*1000)
+death_cert <- death_cert %>% left_join(predicted_pop2, by = "date") %>%
+  mutate(rate2 = deaths/pop2*365*1000)
+
+#remove most 2018 days from data set
+death_cert<-death_cert %>% 
+  subset(year <= 2017 |   (month<=2 & year == 2018))
+predicted_pop<-head(predicted_pop,nrow(death_cert))
+
+p1 <- qplot(date, rate, data=death_cert, geom = "line")+
+scale_x_date(date_labels = "%b %y", date_breaks = "1 months") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  #ggtitle("Mortality rate") + 
+  ylab("Mortality Rate") + xlab("Date")
+p2 <- qplot(date, pop, data=predicted_pop, geom = "line")+
+scale_x_date(date_labels = "%b %y", date_breaks = "1 months") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +  
+  ylab("Population") + xlab("Date")
+grid.arrange(p2, p1, ncol=2)
+#popandMortalityrate (after expanding screen in R)
+
+## Hard to see anything in chart below
+#xaxt="n",
+plot(death_cert$rate[1:365],type="l",xlab="Time",
+ylab="Mortality Rate",ylim=c(min(death_cert$rate)-1,
+max(death_cert$rate)+1))
+#axis(1,at=1:365,labels=1:365,las=2)
+lines(death_cert$rate[366:(366+364)],lty=2,col="red")
+lines(death_cert$rate[(366+365+1):(366+365+364)],lty=3,col="blue")
+lines(death_cert$rate[(366+365+364+1):(366+365+364+1+89)],lty=4,col="green")
+lines(death_cert$rate[49:60],lty=5,col="purple")
+lines(death_cert$rate[61:72],lty=6,col="orange")
+lines(death_cert$rate[73:84],lty=7,col="darkblue")
+legend(8.2,.22,legend=c("Binomial","Normal"),
+fill=c(rainbow(12,alpha=.7)[1],rainbow(12,alpha=.7)[8]),bg="white")
+legend("topleft", legend=c("2015","2016","2017","2018"), 
+lty=c(1,2,3,4), col=c("black","red","blue","green")) 
+
+
+dn<-1:nrow(death_cert) #index of time
+ms<-ifelse(death_cert$year==2017&death_cert$month==9&death_cert$day>=20,1,0)#after maria september indicator, not sum(ms)=11 as it should
+mo<-ifelse(death_cert$year==2017&death_cert$month==10,1,0)
+mn<-ifelse(death_cert$year==2017&death_cert$month==11,1,0)
+md<-ifelse(death_cert$year==2017&death_cert$month==12,1,0)
+me<-ifelse(death_cert$year==2018&death_cert$month==1,1,0)
+mf<-ifelse(death_cert$year==2018&death_cert$month==2,1,0)
+
+
+
+############## Poisson model
+lpop<-log(death_cert$pop)
+lpop2<-log(death_cert$pop2)
+
+Time<-(dn - min(dn))/(max(dn) - min(dn))
+doy<-c(1:365,1:366,1:365,1:59)
+fit_n3 <- gam(death_cert$deaths ~ s(doy,k=32,bs="cc")+s(Time,k=32)+ms+mo+mn+md+me+mf,offset=lpop,family=poisson,method="REML")
+summary(fit_n3) #linear yearly effect is reasonable
+
+
+yr<-Time #as.factor(death_cert$year)
+fit_n3 <- gam(death_cert$deaths ~ s(doy,k=32,bs="cc")+ms+mo+mn+md+me+mf+yr,offset=lpop,family=poisson,method="REML")
+summary(fit_n3) #linear yearly effect is reasonable
+fit_n3_noadj <- gam(death_cert$deaths ~ s(doy,k=32,bs="cc")+ms+mo+mn+md+me+mf+yr,offset=lpop2,family=poisson,method="REML")
+summary(fit_n3_noadj) 
+
+out <- summary(fit_n3)
+ exp(out$p.coeff[2:7]-1.96*out$se[2:7])
+ exp(out$p.coeff[2:7]+1.96*out$se[2:7])
+
+out_noadj <- summary(fit_n3_noadj)
+ exp(out_noadj$p.coeff[2:7]-1.96*out_noadj$se[2:7])
+ exp(out_noadj$p.coeff[2:7]+1.96*out_noadj$se[2:7])
+
+
+#simplifying model
+fit_n <- gam(death_cert$deaths ~ s(doy,k=32,bs="cc")+ms+mo+mn+md+yr,offset=lpop,family=poisson,method="REML") #scale=-1 did not indicate overdispersion
+summary(fit_n)
+#resid.ssq <- sum(residuals(fit_n,type="pearson")^2)  ## sum of squares of Pearson resids
+#resid.df <- nrow(death_cert)-length(coef(fit_n))        ## estimated resid df (N-p)
+#resid.ssq/resid.df
+
+
+fit_nm <- gam(death_cert$deaths ~ s(doy,k=32,bs="cc")+ms+mo+mn+yr,offset=lpop,family=poisson,method="REML") 
+anova(fit_nm,fit_n,test="Chisq") #rejects choosing simpler model
+acf(residuals(fit_n,type="pearson"))
+pacf(residuals(fit_n,type="pearson"))
+plot(fit_n,all.terms=T)
+gam.check(fit_n) #k is fine
+
+
+exp(coef(fit_n)[2:5]) # PRicans had 1.530 times the risk of dying in Sep compared to pre-Maria
+cor(death_cert$rate,fit_n$fitted)^2 
+
+# the adaptive fit below is not better than fit_n
+#fit_adnm <- gam(death_cert$deaths ~ ms+mo+mn+md+yr+s(doy,k=32,m=4,bs="ad"),offset=lpop,family=poisson,method="REML") 
+# summary(fit_adnm)
+
+#### quick look at fit of model, versus how model would look had HM not occurred
+pn <- data.frame(doy=doy,ms=rep(0,length(doy)),mo=rep(0,length(doy)),
+mn=rep(0,length(doy)),md=rep(0,length(doy)),yr=yr)
+ilink <- family(fit_n)$linkinv
+no_hm<- exp(lpop2)*ilink(predict(fit_n,pn))
+plot(death_cert$deaths)
+lines(no_hm,col="blue")
+lines(fitted(fit_n),col="red")
+
+#approximate 95% point-wise CI
+plot(fit_n, shade = TRUE, seWithMean = TRUE, residuals = TRUE, pch = 16, cex = 0.8)
+
+
+#point-wise CIs
+check <- death_cert %>% filter(date >=ymd("2016-09-01"))
+fits<-fit_n$fitted[(length(fit_n$fitted)-(nrow(check)-1)):length(fit_n$fitted)]
+ilink <- family(fit_n)$linkinv
+ses<-ilink(predict(fit_n,se=TRUE)$se)
+ses<-ses[(length(fit_n$fitted)-(nrow(check)-1)):length(fit_n$fitted)]
+tmp <- death_cert %>% filter(date>=ymd("2016-09-01")) %>%
+  mutate(fit = fits,
+         se_fit = ses)
+
+p3<-tmp%>%ggplot(aes(date, deaths)) +
+  geom_point(alpha=0.5) +
+  geom_ribbon(aes(date, ymin = fit - 1.96*se_fit, ymax = fit + 1.96*se_fit), fill="blue", alpha = 0.25) +
+  geom_line(aes(date, fit), col = "blue") +
+  scale_x_date(date_labels = "%b %y", date_breaks = "1 months") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  #ggtitle("Mortality") + 
+  ylab("Daily Mortality") + xlab("Date")
+  #geom_hline(yintercept = 0, lty = 2)
+
+
+
+
+
+
+#BETTER ALTERNATIVE
+who<-which(death_cert$date >=ymd("2016-09-01"))
+pd <- data.frame(doy=doy,ms=ms,mo=mo,mn=mn,md=md,yr=yr)
+Zp <- predict(fit_n,pd,type="lpmatrix") ## map coefs to fitted curves
+pd2 <- data.frame(doy=doy,ms=rep(0,length(n)),mo=rep(0,length(n)),
+mn=rep(0,length(n)),md=rep(0,length(n)),yr=yr)
+Zp2 <- predict(fit_n,pd2,type="lpmatrix") ## map coefs to fitted curves
+pd<-pd[who,];pd2<-pd2[who,]
+Zp<-Zp[who,];Zp2<-Zp2[who,]
+spop<-death_cert$pop[who]
+gamma <- coef(fit_n);Vb <- vcov(fit_n) ## posterior mean and cov of coefs
+n <- 10000
+library(MASS) #mvnorm
+set.seed(944)
+gr <- mvrnorm(n,gamma,Vb) ## simulate n rep coef vectors from post.
+
+pred.all <- matrix(NA,n,nrow(Zp))
+
+ilink <- family(fit_n)$linkinv
+for (i in 1:n) { ## loop to get diff for each sim
+pred.all[i,] <- spop*ilink(Zp%*%gr[i,])  ## curve for this replicate
+
+}
+
+pred.all_ci<-apply(pred.all, 2,quantile,probs=c(0.025,.975) )
+
+
+p3S<-tmp%>%ggplot(aes(date, deaths)) +
+  geom_point(alpha=0.5) +
+  geom_ribbon(aes(date, ymin = pred.all_ci[1,], ymax = pred.all_ci[2,]), fill="red", alpha = 0.25) +
+  geom_line(aes(date, fit), col = "blue") +
+  scale_x_date(date_labels = "%b %y", date_breaks = "1 months") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  #ggtitle("Mortality") + 
+  ylab("Daily Mortality") + xlab("Date")
+  #geom_hline(yintercept = 0, lty = 2)
+# saved as fitperformance.png #AJE paper fill="grey44", and col="black"
+
+
+##### CUMULATIVE EXCESS DEATHS
+who<-which(death_cert$date >=ymd("2017-09-20") &
+death_cert$date <=ymd("2017-12-31"))
+doys<-doy[who]
+mss<-ms[who]
+mos<-mo[who]
+mns<-mn[who]
+mds<-md[who]
+yrs<-yr[who]
+pds<-data.frame(doy=doys,ms=mss,mo=mos,mn=mns,md=mds,yr=yrs)
+ilink <- family(fit_n)$linkinv
+Zps <- exp(lpop[who])*ilink(predict(fit_n,pds)) #contrast total cumsum(Zps)[103]to sum(fitted(fit_n)[(994):(994+102)])
+pd2s <- data.frame(doy=doys,ms=rep(0,length(who)),mo=rep(0,length(who)),
+mn=rep(0,length(who)),md=rep(0,length(who)),yr=yrs) #Hurricane Maria never happened conditions
+Zp2s <- exp(lpop[who])*ilink(predict(fit_n,pd2s)) #predicted daily deaths if HM never happened #changed to account for displacement (replaced lpop2)
+all_excs<-Zps-Zp2s
+sum(all_excs)
+#cumulative for each month
+sum(all_excs[1:11])
+sum(all_excs[12:42])
+sum(all_excs[43:72])
+sum(all_excs[73:103])
+
+#cumulative end of month
+sum(all_excs[1:11])
+sum(all_excs[1:42])
+sum(all_excs[1:72])
+sum(all_excs[1:103])
+total_exc_c<-cumsum(all_excs)
+
+
+
+##### Cumulative CIs
+who<-which(death_cert$date >=ymd("2017-09-20"))
+pd <- data.frame(doy=doy,ms=ms,mo=mo,mn=mn,md=md,yr=yr)
+Zp <- predict(fit_n,pd,type="lpmatrix") ## map coefs to fitted curves
+pd2 <- data.frame(doy=doy,ms=rep(0,length(n)),mo=rep(0,length(n)),
+mn=rep(0,length(n)),md=rep(0,length(n)),yr=yr)
+Zp2 <- predict(fit_n,pd2,type="lpmatrix") ## map coefs to fitted curves
+pd<-pd[who,];pd2<-pd2[who,]
+Zp<-Zp[who,];Zp2<-Zp2[who,]
+spop<-death_cert$pop[who]
+spop2<-death_cert$pop2[who]
+gamma <- coef(fit_n);Vb <- vcov(fit_n) ## posterior mean and cov of coefs
+n <- 10000 #bringing up to 100000 change CIs little from 10000 but not too long to run
+library(MASS) #mvnorm
+set.seed(944)
+gr <- mvrnorm(n,gamma,Vb) ## simulate n rep coef vectors from post.
+a.range <- matrix(NA,n,nrow(Zp))
+cum1 <- rep(NA, n);cum2 <- rep(NA, n);cum3 <- rep(NA, n);cum4 <- rep(NA, n)
+ilink <- family(fit_n)$linkinv
+for (i in 1:n) { ## loop to get diff for each sim
+pred.a <- spop*ilink(Zp%*%gr[i,])  ## curve for this replicate
+pred.a2 <- spop*ilink(Zp2%*%gr[i,]) #Ignore spop2, because otherwise excess will always be declining as pop decreases (too strong an assumption)
+a.range[i,] <- pred.a-pred.a2 ## range for this curve
+cum1[i]<-sum(pred.a[1:11])-sum(pred.a2[1:11])
+cum2[i]<-sum(pred.a[1:42])-sum(pred.a2[1:42])
+cum3[i]<-sum(pred.a[1:72])-sum(pred.a2[1:72])
+cum4[i]<-sum(pred.a[1:103])-sum(pred.a2[1:103])
+}
+
+excess<-apply(a.range, 2,quantile,probs=c(0.025,.975) )
+ci1 <- quantile(cum1, c(.025,.975)) #CI of excess deaths until 9/30
+ ci2 <- quantile(cum2, c(.025,.975))#CI of excess deaths until 10/31
+ ci3 <- quantile(cum3, c(.025,.975))#CI of excess deaths until 11/30
+ci4 <- quantile(cum4, c(.025,.975))#CI of excess deaths until 12/31
+
+
+#q<-ncol(excess)-length(total_exc_c)
+#total_exc_c<-c(total_exc_c,rep(last(total_exc_c),q))
+excess2<-excess[,1:103]
+
+tmp %>%
+  filter(date >=ymd("2017-09-20") & date <=ymd("2017-12-31")) %>%
+  mutate(l_cdf = cumsum(excess2[1,]), 
+         u_cdf =cumsum(excess2[2,]),raw_cdf = total_exc_c) %>%
+  ggplot() +
+  geom_step(aes(date, l_cdf)) +
+geom_step(aes(date, u_cdf)) +
+geom_step(aes(date, raw_cdf),col="red") +
+  scale_x_date(date_labels = "%b %y", date_breaks = "1 months") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  #ggtitle("Excess deaths by date") + 
+  ylab("Cumulative Excess Deaths") +xlab("Date")+
+  geom_hline(yintercept = 64, lty=2, col="grey")
+#cumulative_excess_deaths
